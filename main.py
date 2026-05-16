@@ -100,15 +100,23 @@ def extract_budget(query: str):
     return None, None
 
 
-# ── Intent Checks ─────────────────────────────────────────────────────────────
+# ── Intent & Context Maps ─────────────────────────────────────────────────────
 def is_pure_greeting(query: str) -> bool:
-    """Catches direct greetings or pleasantries instantly."""
     q = query.strip().lower().strip("?!.,")
     greetings = {
         "hi", "hello", "hey", "hey there", "good morning", "good afternoon", 
         "good evening", "wasup", "whats up", "greetings", "anyone there", "yo"
     }
     return q in greetings
+
+# Semantic mapping to connect search intent words directly to internal product terms
+CONCEPT_SYNONYMS = {
+    "kids": ["baby", "boy", "girl", "child", "infant", "musical"],
+    "kid": ["baby", "boy", "girl", "child", "infant", "musical"],
+    "child": ["baby", "boy", "girl", "child", "infant"],
+    "gifting": ["gift", "box", "set", "present", "packaging", "coin"],
+    "giftbox": ["gift", "box", "set", "packaging", "coin box"]
+}
 
 
 # ── Smart Product Matcher ─────────────────────────────────────────────────────
@@ -125,7 +133,7 @@ def match_products(user_message: str, products: list):
     elif min_price is not None and max_price is not None:
         budget_info = f"Budget restriction: Between Rs.{int(min_price):,} and Rs.{int(max_price):,}."
 
-    # 2. Filter pool by budget
+    # 2. Base budget filtering
     def in_budget(p):
         try:
             price = float(p["price"])
@@ -141,8 +149,10 @@ def match_products(user_message: str, products: list):
     if not pool:
         pool = products
 
-    # 3. Clean keywords (Extract numbers and words alike, e.g., '999', 'gift')
-    words = re.findall(r"\w+", query)
+    # 3. Keyword parsing 
+    clean_query = re.sub(r'[^\w\s]', ' ', query)
+    words = clean_query.split()
+    
     stopwords = {
         "i", "me", "my", "want", "need", "looking", "for", "a", "an", "the",
         "some", "any", "please", "can", "you", "show", "suggest", "recommend",
@@ -151,38 +161,48 @@ def match_products(user_message: str, products: list):
         "under", "below", "above", "less", "more", "than", "budget", "price",
         "cheap", "expensive", "affordable", "within", "around", "between"
     }
-    keywords = [w for w in words if w not in stopwords]
+    
+    keywords = [w for w in words if w not in stopwords and len(w) > 1]
 
-    # 4. Strict catalog structural scanning
+    # Expand keywords using semantic mappings
+    expanded_keywords = set(keywords)
+    for kw in keywords:
+        if kw in CONCEPT_SYNONYMS:
+            expanded_keywords.update(CONCEPT_SYNONYMS[kw])
+
+    # 4. Scoring Catalog Names
     scored_products = []
     for p in pool:
         title = p["title"].lower()
-        tags = [t.lower() for t in p["tags"]] if isinstance(p["tags"], list) else []
         body = p["description"].lower()
+        tags = [t.lower() for t in p["tags"]] if isinstance(p["tags"], list) else []
 
         score = 0
-        matched_words_count = 0
+        matched_count = 0
 
-        for kw in keywords:
-            # Direct hit inside title or tag gets massive preference
-            if kw in title or any(kw in tag for tag in tags):
-                score += 20
-                matched_words_count += 1
+        # High priority check: If sequence of text query exists inside title string
+        # e.g., "999" or "gift box" or "baby boy" matching your exact product name
+        for kw in expanded_keywords:
+            if kw in title:
+                score += 35
+                matched_count += 1
+            elif any(kw in tag for tag in tags):
+                score += 15
+                matched_count += 1
             elif kw in body:
                 score += 5
-                matched_words_count += 1
 
-        # Multi-word matches (like matching both '999' and 'box' simultaneously) earn huge priority boosts
-        if len(keywords) > 1 and matched_words_count >= len(keywords):
-            score += 100
+        # Massive extra weight boost for multi-word exact intersections (like '999' + 'box')
+        if len(keywords) > 1 and matched_count >= 2:
+            score += 150
 
         if score > 0:
             scored_products.append((score, p))
 
-    # Sort products based on priority score
+    # Sort items by structural alignment score
     scored_products.sort(key=lambda x: x[0], reverse=True)
     
-    # Return exactly matched products without appending fallback garbage data
+    # Return matched products cleanly
     matched = [item[1] for item in scored_products][:3]
     return matched, budget_info
 
@@ -193,7 +213,7 @@ async def chat(req: ChatRequest):
     try:
         user_msg = req.message.strip()
         
-        # PIPELINE 1: The user said a basic greeting
+        # PIPELINE 1: Greeting Handshake
         if is_pure_greeting(user_msg):
             system_prompt = (
                 "You are the elegant AI boutique concierge for *Taravya*, a premium sterling silver jewellery brand from India. "
@@ -216,11 +236,10 @@ async def chat(req: ChatRequest):
                 "products": []
             }
 
-        # PIPELINE 2: Specific Catalog & Product Queries
+        # PIPELINE 2: Intelligent Catalog Matching Engine
         products = get_products()
         matched_products, budget_info = match_products(user_msg, products)
 
-        # Build dynamic context block based on whether items matched or not
         if matched_products:
             product_context = "\n".join([
                 f"- **{p['title']}** -- Rs.{float(p['price']):,.0f} | Description: {p['description'][:100]}"
@@ -239,14 +258,13 @@ EXACT MATCHED PIECES FROM CATALOG:
 {product_context}
 
 STRICT RULES:
-- Talk ONLY about the products explicitly listed above. Do not bring up other product models.
+- Talk ONLY about the products explicitly listed above. Do not bring up or invent other names.
 - Keep your response to 3-5 sentences maximum in flowing, premium prose.
 - Do NOT use bullet points, numbered lists, URLs, links, or image brackets.
 - Use markdown: **bold** for product names, *italics* for descriptive styling details.
 - End with a gentle question helping them finalize their choice."""
 
         else:
-            # Fallback if text search returned nothing from the inventory catalog
             system_prompt = f"""You are the AI concierge for *Taravya*, an exquisite sterling silver jewellery brand from India.
 The customer is asking about '{user_msg}', but currently no products perfectly match this description in our active inventory lines.
 
