@@ -3,7 +3,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from groq import Groq
 import requests
-import random
 import re
 
 # ── Groq Client ─────────────────────────────────────────────────────────────
@@ -31,32 +30,34 @@ class ChatRequest(BaseModel):
 
 # ── Product Fetcher ───────────────────────────────────────────────────────────
 def get_products():
-    response = requests.get(f"{STORE_URL}/products.json?limit=50", timeout=10)
-    data = response.json()
-    products = []
+    try:
+        response = requests.get(f"{STORE_URL}/products.json?limit=50", timeout=10)
+        data = response.json()
+        products = []
 
-    for p in data.get("products", []):
-        title = p.get("title", "")
-        handle = p.get("handle", "")
-        images = p.get("images", [])
-        variants = p.get("variants", [])
-        tags = p.get("tags", [])
-        product_type = p.get("product_type", "")
-        body_html = p.get("body_html", "")
-        description = re.sub(r"<[^>]+>", " ", body_html).strip()
+        for p in data.get("products", []):
+            title = p.get("title", "")
+            handle = p.get("handle", "")
+            images = p.get("images", [])
+            variants = p.get("variants", [])
+            tags = p.get("tags", [])
+            product_type = p.get("product_type", "")
+            body_html = p.get("body_html", "")
+            description = re.sub(r"<[^>]+>", " ", body_html).strip()
 
-        products.append({
-            "title": title,
-            "handle": handle,
-            "url": f"https://taravya.in/products/{handle}",
-            "image": images[0]["src"] if images else "",
-            "price": variants[0]["price"] if variants else "0",
-            "description": description[:300],
-            "tags": tags,
-            "product_type": product_type,
-        })
-
-    return products
+            products.append({
+                "title": title,
+                "handle": handle,
+                "url": f"https://taravya.in/products/{handle}",
+                "image": images[0]["src"] if images else "",
+                "price": variants[0]["price"] if variants else "0",
+                "description": description[:300],
+                "tags": tags,
+                "product_type": product_type,
+            })
+        return products
+    except Exception:
+        return []
 
 
 # ── Price Extractor ───────────────────────────────────────────────────────────
@@ -99,76 +100,32 @@ def extract_budget(query: str):
     return None, None
 
 
-# ── Synonym Map ───────────────────────────────────────────────────────────────
-SYNONYMS = {
-    "ring":      ["ring", "band"],
-    "rings":     ["ring", "band"],
-    "earring":   ["earring", "stud", "hoop", "drop"],
-    "earrings":  ["earring", "stud", "hoop", "drop"],
-    "necklace":  ["necklace", "chain", "pendant", "choker"],
-    "necklaces": ["necklace", "chain", "pendant", "choker"],
-    "bracelet":  ["bracelet", "bangle", "cuff"],
-    "bracelets": ["bracelet", "bangle", "cuff"],
-    "pendant":   ["pendant", "necklace", "chain"],
-    "chain":     ["chain", "necklace"],
-    "stud":      ["stud", "earring"],
-    "studs":     ["stud", "earring"],
-    "hoop":      ["hoop", "earring"],
-    "hoops":     ["hoop", "earring"],
-    "bangle":    ["bangle", "bracelet"],
-    "bangles":   ["bangle", "bracelet"],
-    "gift":      ["gift", "box", "set", "gifting", "present"],
-    "box":       ["box", "gift", "set", "packaging"],
-    "set":       ["set", "combo", "collection", "gift"],
-    "silver":    ["silver", "sterling"],
-    "bridal":    ["bridal", "wedding", "bride", "engagement"],
-    "wedding":   ["wedding", "bridal", "bride"],
-    "everyday":  ["everyday", "daily", "casual", "minimal"],
-    "minimal":   ["minimal", "everyday", "simple", "classic"],
-    "classic":   ["classic", "minimal", "simple"],
-    "bold":      ["bold", "statement", "chunky"],
-    "statement": ["statement", "bold", "chunky"],
-    "men":       ["men", "male", "him", "masculine", "titan", "gents"],
-    "him":       ["men", "male", "him", "masculine"],
-    "her":       ["women", "female", "her", "feminine", "ladies"],
-    "women":     ["women", "female", "her", "feminine", "ladies"],
-    "small":     ["small", "mini", "delicate", "tiny", "petite"],
-    "large":     ["large", "big", "bold", "statement", "chunky"],
-}
-
-
 # ── Intent Checks ─────────────────────────────────────────────────────────────
 def is_pure_greeting(query: str) -> bool:
-    """Detects simple pleasantries so we don't force feed products immediately."""
+    """Catches direct greetings or pleasantries instantly."""
     q = query.strip().lower().strip("?!.,")
     greetings = {
         "hi", "hello", "hey", "hey there", "good morning", "good afternoon", 
-        "good evening", "wasup", "whats up", "greetings", "anyone there"
+        "good evening", "wasup", "whats up", "greetings", "anyone there", "yo"
     }
     return q in greetings
-
-
-# ── Whole Word Matcher ────────────────────────────────────────────────────────
-def word_match(keyword: str, text: str) -> bool:
-    """Match whole word only — 'ring' will NOT match inside 'earring'."""
-    return bool(re.search(r'\b' + re.escape(keyword) + r'\b', text))
 
 
 # ── Smart Product Matcher ─────────────────────────────────────────────────────
 def match_products(user_message: str, products: list):
     query = user_message.lower()
 
-    # 1. Extract budget
+    # 1. Budget extraction
     min_price, max_price = extract_budget(query)
     budget_info = ""
     if max_price is not None and min_price is None:
-        budget_info = f"The customer's budget is under Rs.{int(max_price):,}. Only recommend products priced at or below Rs.{int(max_price):,}."
+        budget_info = f"Budget restriction: Under Rs.{int(max_price):,}."
     elif min_price is not None and max_price is None:
-        budget_info = f"The customer wants pieces above Rs.{int(min_price):,}. Only recommend products priced at or above Rs.{int(min_price):,}."
+        budget_info = f"Budget restriction: Above Rs.{int(min_price):,}."
     elif min_price is not None and max_price is not None:
-        budget_info = f"The customer's budget is between Rs.{int(min_price):,} and Rs.{int(max_price):,}. Only recommend products within this price range."
+        budget_info = f"Budget restriction: Between Rs.{int(min_price):,} and Rs.{int(max_price):,}."
 
-    # 2. Filter by price pool
+    # 2. Filter pool by budget
     def in_budget(p):
         try:
             price = float(p["price"])
@@ -183,153 +140,135 @@ def match_products(user_message: str, products: list):
     pool = [p for p in products if in_budget(p)]
     if not pool:
         pool = products
-        budget_info += " (Note: no products currently match this exact budget — showing closest alternatives.)"
 
-    # 3. Clean and isolate query components
-    clean_query = re.sub(r'[^\w\s]', ' ', query)
-    query_words = clean_query.split()
-
+    # 3. Clean keywords (Extract numbers and words alike, e.g., '999', 'gift')
+    words = re.findall(r"\w+", query)
     stopwords = {
         "i", "me", "my", "want", "need", "looking", "for", "a", "an", "the",
         "some", "any", "please", "can", "you", "show", "suggest", "recommend",
         "something", "is", "are", "do", "have", "get", "find", "what", "which",
         "best", "good", "nice", "beautiful", "pretty", "love", "like",
         "under", "below", "above", "less", "more", "than", "budget", "price",
-        "cheap", "expensive", "affordable", "within", "around", "between",
-        "2000", "1000", "3000", "1500", "500", "2k", "1k", "3k",
+        "cheap", "expensive", "affordable", "within", "around", "between"
     }
-    
-    base_keywords = [w for w in query_words if w not in stopwords and len(w) > 1]
+    keywords = [w for w in words if w not in stopwords]
 
-    expanded = set()
-    for kw in base_keywords:
-        expanded.add(kw)
-        if kw in SYNONYMS:
-            expanded.update(SYNONYMS[kw])
-
-    # 4. Score each product
-    scored = []
-    for product in pool:
-        title = product["title"].lower()
-        body = (
-            product["description"] + " " +
-            product["product_type"] + " " +
-            " ".join(product["tags"] if isinstance(product["tags"], list) else [])
-        ).lower()
+    # 4. Strict catalog structural scanning
+    scored_products = []
+    for p in pool:
+        title = p["title"].lower()
+        tags = [t.lower() for t in p["tags"]] if isinstance(p["tags"], list) else []
+        body = p["description"].lower()
 
         score = 0
-        
-        # Check for absolute direct title substrings (e.g. '999 gift box' inside product name)
-        if len(base_keywords) >= 2 and all(word in title for word in base_keywords):
-            score += 50  # Huge weight boost for multi-word explicit target matches
+        matched_words_count = 0
 
-        for kw in expanded:
-            if word_match(kw, title):
-                score += 10  # High preference for direct matches
-            elif word_match(kw, body):
-                score += 2
+        for kw in keywords:
+            # Direct hit inside title or tag gets massive preference
+            if kw in title or any(kw in tag for tag in tags):
+                score += 20
+                matched_words_count += 1
+            elif kw in body:
+                score += 5
+                matched_words_count += 1
 
-        scored.append((score, product))
+        # Multi-word matches (like matching both '999' and 'box' simultaneously) earn huge priority boosts
+        if len(keywords) > 1 and matched_words_count >= len(keywords):
+            score += 100
 
-    scored.sort(key=lambda x: x[0], reverse=True)
+        if score > 0:
+            scored_products.append((score, p))
 
-    # If explicit target matches found, keep ONLY matches and do not append fallback randoms
-    matched = [p for score, p in scored if score > 0][:3]
-
-    # Handle budget search when no specific structural tag keywords match
-    if not matched and max_price and scored:
-        scored.sort(key=lambda x: float(x[1]["price"] or 0))
-        matched = [scored[i][1] for i in range(min(3, len(scored)))]
-
-    return matched, budget_info
-
-
-# ── System Prompt Builder ─────────────────────────────────────────────────────
-def build_system_prompt(product_context: str, budget_info: str = "", greeting_mode: bool = False) -> str:
-    budget_block = f"\nBUDGET CONSTRAINT (CRITICAL — never violate this):\n{budget_info}\n" if budget_info else ""
+    # Sort products based on priority score
+    scored_products.sort(key=lambda x: x[0], reverse=True)
     
-    context_block = ""
-    if greeting_mode:
-        context_block = "\nCONTEXT: The user has just initiated contact or said hello. Do not feature specific product links or cards yet unless they mention items. Welcome them with warmth and elegance."
-    else:
-        context_block = f"\nAVAILABLE PIECES TODAY (with prices):\n{product_context}"
-
-    return f"""You are the AI concierge for *Taravya*, an exquisite sterling silver jewellery brand from India.
-
-Your persona: refined, warm, knowledgeable — like a trusted personal jeweller who has dressed discerning women for generations. You speak with quiet authority and genuine passion for jewellery craft.
-
-Your role is to:
-- Understand what the customer truly desires (occasion, mood, recipient, aesthetic)
-- Recommend pieces from the curated selection below with genuine enthusiasm
-- Explain *why* a piece suits them — its character, craftsmanship, when to wear it
-- Use evocative, sensory language that makes the jewellery come alive
-- Be concise but never cold — warm elegance is your register
-{budget_block}{context_block}
-
-STRICT RULES:
-- Only mention products from the list above — never invent names or prices
-- NEVER recommend or mention any product whose price exceeds the customer's stated budget
-- Keep your response to 3-5 sentences maximum
-- Do NOT mention URLs, links, or image paths
-- Do NOT use bullet points or numbered lists
-- Speak in flowing prose, as a luxury stylist would
-- Use markdown: **bold** for product names, *italics* for evocative descriptors
-- End with a gentle question or invitation to refine their choice
-- If the query is off-topic (not about jewellery or styling), gracefully redirect
-
-Remember: every word you write reflects the Taravya brand — understated luxury, timeless craft."""
+    # Return exactly matched products without appending fallback garbage data
+    matched = [item[1] for item in scored_products][:3]
+    return matched, budget_info
 
 
 # ── Chat Endpoint ─────────────────────────────────────────────────────────────
 @app.post("/chat")
 async def chat(req: ChatRequest):
     try:
-        # Check if greeting intent
-        greeting_mode = is_pure_greeting(req.message)
+        user_msg = req.message.strip()
         
+        # PIPELINE 1: The user said a basic greeting
+        if is_pure_greeting(user_msg):
+            system_prompt = (
+                "You are the elegant AI boutique concierge for *Taravya*, a premium sterling silver jewellery brand from India. "
+                "The user just greeted you. Respond with a warm, sophisticated welcome (2-3 sentences max). "
+                "Ask how you can assist them today with choosing the perfect jewellery piece or finding an elegant gift. "
+                "Do NOT recommend or list specific products right now. Speak in elegant, flowing prose."
+            )
+            
+            completion = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_msg},
+                ],
+                temperature=0.7,
+                max_tokens=150,
+            )
+            return {
+                "reply": completion.choices[0].message.content.strip(),
+                "products": []
+            }
+
+        # PIPELINE 2: Specific Catalog & Product Queries
         products = get_products()
-        matched_products, budget_info = match_products(req.message, products)
+        matched_products, budget_info = match_products(user_msg, products)
 
-        # Clear matched array data payload for frontend if we are just responding to "hi"
-        if greeting_mode:
-            matched_products = []
+        # Build dynamic context block based on whether items matched or not
+        if matched_products:
+            product_context = "\n".join([
+                f"- **{p['title']}** -- Rs.{float(p['price']):,.0f} | Description: {p['description'][:100]}"
+                for p in matched_products
+            ])
+            
+            system_prompt = f"""You are the AI concierge for *Taravya*, an exquisite sterling silver jewellery brand from India.
+Your persona: refined, warm, knowledgeable — like a trusted personal jeweller.
 
-        product_context = "\n".join([
-            f"- **{p['title']}** -- Rs.{float(p['price']):,.0f}"
-            + (f" | {p['description'][:120]}" if p["description"] else "")
-            for p in matched_products
-        ])
+Your role is to present the matched items provided below to the customer with genuine luxury styling flair. Explain beautifully why these match what they asked for.
+
+BUDGET / CONSTRAINT CONTEXT:
+{budget_info}
+
+EXACT MATCHED PIECES FROM CATALOG:
+{product_context}
+
+STRICT RULES:
+- Talk ONLY about the products explicitly listed above. Do not bring up other product models.
+- Keep your response to 3-5 sentences maximum in flowing, premium prose.
+- Do NOT use bullet points, numbered lists, URLs, links, or image brackets.
+- Use markdown: **bold** for product names, *italics* for descriptive styling details.
+- End with a gentle question helping them finalize their choice."""
+
+        else:
+            # Fallback if text search returned nothing from the inventory catalog
+            system_prompt = f"""You are the AI concierge for *Taravya*, an exquisite sterling silver jewellery brand from India.
+The customer is asking about '{user_msg}', but currently no products perfectly match this description in our active inventory lines.
+
+Politely and beautifully inform them that we don't have that exact piece or collection variant available today, and gracefully invite them to explore your timeless silver rings, earrings, pendants, or customizable gifting suites instead. Do not show or invent any product data fields."""
 
         completion = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[
-                {
-                    "role": "system",
-                    "content": build_system_prompt(product_context, budget_info, greeting_mode),
-                },
-                {
-                    "role": "user",
-                    "content": req.message,
-                },
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_msg},
             ],
-            temperature=0.7,
-            max_tokens=280,
+            temperature=0.6,
+            max_tokens=250,
         )
 
-        ai_reply = completion.choices[0].message.content.strip()
-
         return {
-            "reply": ai_reply,
+            "reply": completion.choices[0].message.content.strip(),
             "products": matched_products,
         }
 
-    except requests.exceptions.RequestException:
-        return {
-            "reply": "I'm having trouble connecting to our collection right now. Please try again in a moment.",
-            "products": [],
-        }
     except Exception as e:
         return {
-            "reply": f"An unexpected error occurred: {str(e)}",
+            "reply": "I apologize, but I encountered a momentary hiccup while viewing our collection. May I assist you with anything else?",
             "products": [],
         }
