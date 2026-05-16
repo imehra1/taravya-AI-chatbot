@@ -100,7 +100,7 @@ def extract_budget(query: str):
     return None, None
 
 
-# ── Intent Maps ───────────────────────────────────────────────────────────────
+# ── Intent & Context Maps ─────────────────────────────────────────────────────
 def is_pure_greeting(query: str) -> bool:
     q = query.strip().lower().strip("?!.,")
     greetings = {
@@ -109,6 +109,7 @@ def is_pure_greeting(query: str) -> bool:
     }
     return q in greetings
 
+# Semantic mapping to connect search intent words directly to internal product terms
 CONCEPT_SYNONYMS = {
     "kids": ["baby", "boy", "girl", "child", "infant", "musical"],
     "kid": ["baby", "boy", "girl", "child", "infant", "musical"],
@@ -118,11 +119,11 @@ CONCEPT_SYNONYMS = {
 }
 
 
-# ── Strict Engine Matcher ─────────────────────────────────────────────────────
+# ── Smart Product Matcher ─────────────────────────────────────────────────────
 def match_products(user_message: str, products: list):
-    query = user_message.lower().strip()
-    
-    # 1. Extract budget constraints
+    query = user_message.lower()
+
+    # 1. Budget extraction
     min_price, max_price = extract_budget(query)
     budget_info = ""
     if max_price is not None and min_price is None:
@@ -132,6 +133,7 @@ def match_products(user_message: str, products: list):
     elif min_price is not None and max_price is not None:
         budget_info = f"Budget restriction: Between Rs.{int(min_price):,} and Rs.{int(max_price):,}."
 
+    # 2. Base budget filtering
     def in_budget(p):
         try:
             price = float(p["price"])
@@ -147,26 +149,10 @@ def match_products(user_message: str, products: list):
     if not pool:
         pool = products
 
-    # Normalize a string down to purely packed single-spaced words for exact phrase analysis
-    def slugify(text: str) -> str:
-        return " ".join(re.findall(r"\w+", text.lower()))
-
-    user_slug = slugify(query)
-
-    # TIER 1: Exact Phrase Matching on Normalized Layout String
-    strict_phrase_matches = []
-    if len(user_slug) > 3:
-        for p in pool:
-            p_title_slug = slugify(p["title"])
-            # Checks if the typed sequence fits perfectly inside the catalog layout name or vice versa
-            if user_slug in p_title_slug or p_title_slug in user_slug:
-                strict_phrase_matches.append(p)
-                
-        if strict_phrase_matches:
-            return strict_phrase_matches[:3], budget_info
-
-    # TIER 2: Intersecting Keyword Density Token Check
-    words = user_slug.split()
+    # 3. Keyword parsing 
+    clean_query = re.sub(r'[^\w\s]', ' ', query)
+    words = clean_query.split()
+    
     stopwords = {
         "i", "me", "my", "want", "need", "looking", "for", "a", "an", "the",
         "some", "any", "please", "can", "you", "show", "suggest", "recommend",
@@ -175,44 +161,49 @@ def match_products(user_message: str, products: list):
         "under", "below", "above", "less", "more", "than", "budget", "price",
         "cheap", "expensive", "affordable", "within", "around", "between"
     }
+    
     keywords = [w for w in words if w not in stopwords and len(w) > 1]
 
+    # Expand keywords using semantic mappings
     expanded_keywords = set(keywords)
     for kw in keywords:
         if kw in CONCEPT_SYNONYMS:
             expanded_keywords.update(CONCEPT_SYNONYMS[kw])
 
+    # 4. Scoring Catalog Names
     scored_products = []
     for p in pool:
-        title_slug = slugify(p["title"])
+        title = p["title"].lower()
         body = p["description"].lower()
         tags = [t.lower() for t in p["tags"]] if isinstance(p["tags"], list) else []
 
         score = 0
-        matched_title_tokens = 0
+        matched_count = 0
 
+        # High priority check: If sequence of text query exists inside title string
+        # e.g., "999" or "gift box" or "baby boy" matching your exact product name
         for kw in expanded_keywords:
-            if kw in title_slug:
-                score += 50
-                matched_title_tokens += 1
+            if kw in title:
+                score += 35
+                matched_count += 1
             elif any(kw in tag for tag in tags):
-                score += 20
-                matched_title_tokens += 1
+                score += 15
+                matched_count += 1
             elif kw in body:
                 score += 5
 
-        # If multiple high-value query tokens match this title layout, apply a dominant score boost
-        if len(keywords) > 1 and matched_title_tokens >= 2:
-            score += 500
+        # Massive extra weight boost for multi-word exact intersections (like '999' + 'box')
+        if len(keywords) > 1 and matched_count >= 2:
+            score += 150
 
         if score > 0:
             scored_products.append((score, p))
 
-    # Sort down matches strictly by confidence depth layout descending
+    # Sort items by structural alignment score
     scored_products.sort(key=lambda x: x[0], reverse=True)
     
-    # Enforce a high structural baseline threshold to prevent unrelated "Silver" pieces from displaying
-    matched = [item[1] for item in scored_products if item[0] >= 100][:3]
+    # Return matched products cleanly
+    matched = [item[1] for item in scored_products][:3]
     return matched, budget_info
 
 
@@ -245,7 +236,7 @@ async def chat(req: ChatRequest):
                 "products": []
             }
 
-        # PIPELINE 2: Precision Engine Catalog Filter Pipeline
+        # PIPELINE 2: Intelligent Catalog Matching Engine
         products = get_products()
         matched_products, budget_info = match_products(user_msg, products)
 
