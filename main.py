@@ -93,8 +93,8 @@ def extract_budget(query: str):
         q
     )
     if m:
-        centre = parse_amount(m.group(1))
-        return centre * 0.8, centre * 1.2
+        center = parse_amount(m.group(1))
+        return center * 0.8, center * 1.2
 
     return None, None
 
@@ -137,6 +137,17 @@ SYNONYMS = {
 }
 
 
+# ── Intent Checks ─────────────────────────────────────────────────────────────
+def is_pure_greeting(query: str) -> bool:
+    """Detects simple pleasantries so we don't force feed products immediately."""
+    q = query.strip().lower().strip("?!.,")
+    greetings = {
+        "hi", "hello", "hey", "hey there", "good morning", "good afternoon", 
+        "good evening", "wasup", "whats up", "greetings", "anyone there"
+    }
+    return q in greetings
+
+
 # ── Whole Word Matcher ────────────────────────────────────────────────────────
 def word_match(keyword: str, text: str) -> bool:
     """Match whole word only — 'ring' will NOT match inside 'earring'."""
@@ -157,7 +168,7 @@ def match_products(user_message: str, products: list):
     elif min_price is not None and max_price is not None:
         budget_info = f"The customer's budget is between Rs.{int(min_price):,} and Rs.{int(max_price):,}. Only recommend products within this price range."
 
-    # 2. Filter by price
+    # 2. Filter by price pool
     def in_budget(p):
         try:
             price = float(p["price"])
@@ -170,12 +181,14 @@ def match_products(user_message: str, products: list):
         return True
 
     pool = [p for p in products if in_budget(p)]
-
     if not pool:
         pool = products
         budget_info += " (Note: no products currently match this exact budget — showing closest alternatives.)"
 
-    # 3. Extract and expand keywords
+    # 3. Clean and isolate query components
+    clean_query = re.sub(r'[^\w\s]', ' ', query)
+    query_words = clean_query.split()
+
     stopwords = {
         "i", "me", "my", "want", "need", "looking", "for", "a", "an", "the",
         "some", "any", "please", "can", "you", "show", "suggest", "recommend",
@@ -185,10 +198,8 @@ def match_products(user_message: str, products: list):
         "cheap", "expensive", "affordable", "within", "around", "between",
         "2000", "1000", "3000", "1500", "500", "2k", "1k", "3k",
     }
-    base_keywords = [
-        w for w in re.findall(r"\w+", query)
-        if w not in stopwords and len(w) > 1
-    ]
+    
+    base_keywords = [w for w in query_words if w not in stopwords and len(w) > 1]
 
     expanded = set()
     for kw in base_keywords:
@@ -196,7 +207,7 @@ def match_products(user_message: str, products: list):
         if kw in SYNONYMS:
             expanded.update(SYNONYMS[kw])
 
-    # 4. Score each product using whole word matching
+    # 4. Score each product
     scored = []
     for product in pool:
         title = product["title"].lower()
@@ -207,33 +218,42 @@ def match_products(user_message: str, products: list):
         ).lower()
 
         score = 0
+        
+        # Check for absolute direct title substrings (e.g. '999 gift box' inside product name)
+        if len(base_keywords) >= 2 and all(word in title for word in base_keywords):
+            score += 50  # Huge weight boost for multi-word explicit target matches
+
         for kw in expanded:
             if word_match(kw, title):
-                score += 3  # title match = highest weight
+                score += 10  # High preference for direct matches
             elif word_match(kw, body):
-                score += 1  # description/tag match
+                score += 2
 
         scored.append((score, product))
 
     scored.sort(key=lambda x: x[0], reverse=True)
 
-    # If budget query with zero keyword scores, sort cheapest first
-    if scored and scored[0][0] == 0 and max_price:
-        scored.sort(key=lambda x: float(x[1]["price"] or 0))
-
-    # Only keep products that actually matched
+    # If explicit target matches found, keep ONLY matches and do not append fallback randoms
     matched = [p for score, p in scored if score > 0][:3]
 
-    # Fallback if nothing matched
-    if not matched:
-        matched = random.sample(pool, min(3, len(pool)))
+    # Handle budget search when no specific structural tag keywords match
+    if not matched and max_price and scored:
+        scored.sort(key=lambda x: float(x[1]["price"] or 0))
+        matched = [scored[i][1] for i in range(min(3, len(scored)))]
 
     return matched, budget_info
 
 
 # ── System Prompt Builder ─────────────────────────────────────────────────────
-def build_system_prompt(product_context: str, budget_info: str = "") -> str:
+def build_system_prompt(product_context: str, budget_info: str = "", greeting_mode: bool = False) -> str:
     budget_block = f"\nBUDGET CONSTRAINT (CRITICAL — never violate this):\n{budget_info}\n" if budget_info else ""
+    
+    context_block = ""
+    if greeting_mode:
+        context_block = "\nCONTEXT: The user has just initiated contact or said hello. Do not feature specific product links or cards yet unless they mention items. Welcome them with warmth and elegance."
+    else:
+        context_block = f"\nAVAILABLE PIECES TODAY (with prices):\n{product_context}"
+
     return f"""You are the AI concierge for *Taravya*, an exquisite sterling silver jewellery brand from India.
 
 Your persona: refined, warm, knowledgeable — like a trusted personal jeweller who has dressed discerning women for generations. You speak with quiet authority and genuine passion for jewellery craft.
@@ -244,9 +264,7 @@ Your role is to:
 - Explain *why* a piece suits them — its character, craftsmanship, when to wear it
 - Use evocative, sensory language that makes the jewellery come alive
 - Be concise but never cold — warm elegance is your register
-{budget_block}
-AVAILABLE PIECES TODAY (with prices):
-{product_context}
+{budget_block}{context_block}
 
 STRICT RULES:
 - Only mention products from the list above — never invent names or prices
@@ -266,8 +284,15 @@ Remember: every word you write reflects the Taravya brand — understated luxury
 @app.post("/chat")
 async def chat(req: ChatRequest):
     try:
+        # Check if greeting intent
+        greeting_mode = is_pure_greeting(req.message)
+        
         products = get_products()
         matched_products, budget_info = match_products(req.message, products)
+
+        # Clear matched array data payload for frontend if we are just responding to "hi"
+        if greeting_mode:
+            matched_products = []
 
         product_context = "\n".join([
             f"- **{p['title']}** -- Rs.{float(p['price']):,.0f}"
@@ -280,14 +305,14 @@ async def chat(req: ChatRequest):
             messages=[
                 {
                     "role": "system",
-                    "content": build_system_prompt(product_context, budget_info),
+                    "content": build_system_prompt(product_context, budget_info, greeting_mode),
                 },
                 {
                     "role": "user",
                     "content": req.message,
                 },
             ],
-            temperature=0.75,
+            temperature=0.7,
             max_tokens=280,
         )
 
