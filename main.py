@@ -9,7 +9,7 @@ import re
 # ── Groq Client ─────────────────────────────────────────────────────────────
 
 client = Groq(
-    api_key="YOUR_GROQ_API_KEY"
+    api_key="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"
 )
 
 STORE_URL = "https://taravya.in"
