@@ -118,11 +118,11 @@ CONCEPT_SYNONYMS = {
 }
 
 
-# ── Strict Engine Matcher ─────────────────────────────────────────────────────
+# ── Precision Engine Matcher ──────────────────────────────────────────────────
 def match_products(user_message: str, products: list):
     query = user_message.lower().strip()
     
-    # 1. Extract budget constraints
+    # 1. Budget extraction
     min_price, max_price = extract_budget(query)
     budget_info = ""
     if max_price is not None and min_price is None:
@@ -147,26 +147,25 @@ def match_products(user_message: str, products: list):
     if not pool:
         pool = products
 
-    # Normalize a string down to purely packed single-spaced words for exact phrase analysis
-    def slugify(text: str) -> str:
+    # Normalize functions to look clean
+    def clean_text(text: str) -> str:
         return " ".join(re.findall(r"\w+", text.lower()))
 
-    user_slug = slugify(query)
+    user_clean = clean_text(query)
 
-    # TIER 1: Exact Phrase Matching on Normalized Layout String
-    strict_phrase_matches = []
-    if len(user_slug) > 3:
-        for p in pool:
-            p_title_slug = slugify(p["title"])
-            # Checks if the typed sequence fits perfectly inside the catalog layout name or vice versa
-            if user_slug in p_title_slug or p_title_slug in user_slug:
-                strict_phrase_matches.append(p)
-                
-        if strict_phrase_matches:
-            return strict_phrase_matches[:3], budget_info
+    # ── STRATEGY 1: DIRECT SUBSTRING LOCK-ON ──
+    # If the customer enters an explicit name sequence matching your catalog, capture it instantly.
+    exact_matches = []
+    for p in pool:
+        title_clean = clean_text(p["title"])
+        if user_clean in title_clean or title_clean in user_clean:
+            exact_matches.append(p)
+            
+    if exact_matches:
+        return exact_matches[:3], budget_info
 
-    # TIER 2: Intersecting Keyword Density Token Check
-    words = user_slug.split()
+    # ── STRATEGY 2: WORD INTERSECTION SEARCH ──
+    words = user_clean.split()
     stopwords = {
         "i", "me", "my", "want", "need", "looking", "for", "a", "an", "the",
         "some", "any", "please", "can", "you", "show", "suggest", "recommend",
@@ -184,35 +183,33 @@ def match_products(user_message: str, products: list):
 
     scored_products = []
     for p in pool:
-        title_slug = slugify(p["title"])
+        title_clean = clean_text(p["title"])
         body = p["description"].lower()
         tags = [t.lower() for t in p["tags"]] if isinstance(p["tags"], list) else []
 
         score = 0
-        matched_title_tokens = 0
+        matched_tokens = 0
 
         for kw in expanded_keywords:
-            if kw in title_slug:
+            if kw in title_clean:
                 score += 50
-                matched_title_tokens += 1
+                matched_tokens += 1
             elif any(kw in tag for tag in tags):
                 score += 20
-                matched_title_tokens += 1
+                matched_tokens += 1
             elif kw in body:
                 score += 5
 
-        # If multiple high-value query tokens match this title layout, apply a dominant score boost
-        if len(keywords) > 1 and matched_title_tokens >= 2:
+        if len(keywords) > 1 and matched_tokens >= 2:
             score += 500
 
         if score > 0:
             scored_products.append((score, p))
 
-    # Sort down matches strictly by confidence depth layout descending
     scored_products.sort(key=lambda x: x[0], reverse=True)
     
-    # Enforce a high structural baseline threshold to prevent unrelated "Silver" pieces from displaying
-    matched = [item[1] for item in scored_products if item[0] >= 100][:3]
+    # Safely pull down any positive matches from our query tracking loop
+    matched = [item[1] for item in scored_products][:3]
     return matched, budget_info
 
 
@@ -222,7 +219,7 @@ async def chat(req: ChatRequest):
     try:
         user_msg = req.message.strip()
         
-        # PIPELINE 1: Greeting Handshake
+        # PIPELINE 1: Greeting Isolation Handshake
         if is_pure_greeting(user_msg):
             system_prompt = (
                 "You are the elegant AI boutique concierge for *Taravya*, a premium sterling silver jewellery brand from India. "
@@ -245,7 +242,7 @@ async def chat(req: ChatRequest):
                 "products": []
             }
 
-        # PIPELINE 2: Precision Engine Catalog Filter Pipeline
+        # PIPELINE 2: Precise Catalog Recommendations Engine
         products = get_products()
         matched_products, budget_info = match_products(user_msg, products)
 
