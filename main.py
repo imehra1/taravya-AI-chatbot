@@ -31,7 +31,8 @@ class ChatRequest(BaseModel):
 # ── Product Fetcher ───────────────────────────────────────────────────────────
 def get_products():
     try:
-        response = requests.get(f"{STORE_URL}/products.json?limit=50", timeout=10)
+        # Bumping limit to 250 to ensure large catalog categories aren't truncated/omitted
+        response = requests.get(f"{STORE_URL}/products.json?limit=250", timeout=10)
         data = response.json()
         products = []
 
@@ -122,7 +123,6 @@ CONCEPT_SYNONYMS = {
 def match_products(user_message: str, products: list):
     query = user_message.lower().strip()
     
-    # 1. Budget extraction
     min_price, max_price = extract_budget(query)
     budget_info = ""
     if max_price is not None and min_price is None:
@@ -147,14 +147,12 @@ def match_products(user_message: str, products: list):
     if not pool:
         pool = products
 
-    # Normalize functions to look clean
     def clean_text(text: str) -> str:
         return " ".join(re.findall(r"\w+", text.lower()))
 
     user_clean = clean_text(query)
 
-    # ── STRATEGY 1: DIRECT SUBSTRING LOCK-ON ──
-    # If the customer enters an explicit name sequence matching your catalog, capture it instantly.
+    # ── STRATEGY 1: DIRECT TITLE STRING CHECK ──
     exact_matches = []
     for p in pool:
         title_clean = clean_text(p["title"])
@@ -164,7 +162,7 @@ def match_products(user_message: str, products: list):
     if exact_matches:
         return exact_matches[:3], budget_info
 
-    # ── STRATEGY 2: WORD INTERSECTION SEARCH ──
+    # ── STRATEGY 2: TOKENS DEEP SCAN ──
     words = user_clean.split()
     stopwords = {
         "i", "me", "my", "want", "need", "looking", "for", "a", "an", "the",
@@ -208,7 +206,6 @@ def match_products(user_message: str, products: list):
 
     scored_products.sort(key=lambda x: x[0], reverse=True)
     
-    # Safely pull down any positive matches from our query tracking loop
     matched = [item[1] for item in scored_products][:3]
     return matched, budget_info
 
@@ -219,7 +216,7 @@ async def chat(req: ChatRequest):
     try:
         user_msg = req.message.strip()
         
-        # PIPELINE 1: Greeting Isolation Handshake
+        # PIPELINE 1: Greeting Handshake
         if is_pure_greeting(user_msg):
             system_prompt = (
                 "You are the elegant AI boutique concierge for *Taravya*, a premium sterling silver jewellery brand from India. "
@@ -242,7 +239,7 @@ async def chat(req: ChatRequest):
                 "products": []
             }
 
-        # PIPELINE 2: Precise Catalog Recommendations Engine
+        # PIPELINE 2: Recommendation Generation Engine
         products = get_products()
         matched_products, budget_info = match_products(user_msg, products)
 
@@ -288,7 +285,7 @@ Politely and beautifully inform them that we don't have that exact piece or coll
 
         return {
             "reply": completion.choices[0].message.content.strip(),
-            "products": matched_products,
+            "products": matched_products, # Always structural data back to populate the UI elements
         }
 
     except Exception as e:
